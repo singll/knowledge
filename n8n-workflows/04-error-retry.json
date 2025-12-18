@@ -1,0 +1,387 @@
+{
+  "name": "04-错误处理重试",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "schedule-retry",
+      "name": "定时检查重试",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "error-queue",
+        "options": {
+          "responseMode": "responseNode"
+        }
+      },
+      "id": "webhook-error-queue",
+      "name": "错误队列入口",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 500],
+      "webhookId": "error-queue"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n  \"N8N_WEBHOOK_URL\": \"http://n8n:5678\"\n}",
+        "options": {}
+      },
+      "id": "config-node",
+      "name": "配置参数",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [470, 300],
+      "notesInFlow": true,
+      "notes": "修改此节点中的配置值"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 从静态数据中获取错误队列\nconst staticData = $getWorkflowStaticData('global');\nconst errorQueue = staticData.errorQueue || [];\nconst config = $('配置参数').first().json;\n\n// 过滤出需要重试的任务（重试次数<3）\nconst tasksToRetry = errorQueue.filter(task => {\n  const retryCount = task.retry_count || 0;\n  return retryCount < 3;\n});\n\nif (tasksToRetry.length === 0) {\n  return {\n    json: {\n      message: '没有需要重试的任务',\n      queue_size: errorQueue.length,\n      timestamp: new Date().toISOString()\n    }\n  };\n}\n\n// 返回需要重试的任务\nreturn tasksToRetry.map(task => ({\n  json: {\n    ...task,\n    retry_attempt: (task.retry_count || 0) + 1,\n    config: config\n  }\n}));"
+      },
+      "id": "get-retry-tasks",
+      "name": "获取重试任务",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-retry-data",
+              "leftValue": "={{ $json.retry_data?.url }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-retry-data",
+      "name": "检查重试数据",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.config.N8N_WEBHOOK_URL }}/webhook/core-crawler",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\": \"{{ $json.retry_data.url }}\",\n  \"dataset_id\": \"{{ $json.retry_data.dataset_id }}\",\n  \"tags\": {{ JSON.stringify($json.retry_data.tags || []) }},\n  \"source\": \"retry\",\n  \"retry_attempt\": {{ $json.retry_attempt }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "retry-crawl",
+      "name": "重试爬取",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1130, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-retry-success",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-retry-result",
+      "name": "检查重试结果",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1350, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 重试成功，从队列中移除\nconst staticData = $getWorkflowStaticData('global');\nconst errorQueue = staticData.errorQueue || [];\nconst currentTask = $('获取重试任务').first().json;\n\n// 根据 URL 移除任务\nstaticData.errorQueue = errorQueue.filter(task => \n  task.retry_data?.url !== currentTask.retry_data?.url\n);\n\nreturn {\n  json: {\n    status: 'success',\n    message: '重试成功，已从队列移除',\n    url: currentTask.retry_data?.url,\n    retry_attempt: currentTask.retry_attempt\n  }\n};"
+      },
+      "id": "remove-from-queue",
+      "name": "从队列移除",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1570, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 重试失败，更新重试次数\nconst staticData = $getWorkflowStaticData('global');\nconst errorQueue = staticData.errorQueue || [];\nconst currentTask = $('获取重试任务').first().json;\nconst retryResult = $input.first().json;\n\n// 更新任务的重试次数\nconst taskIndex = errorQueue.findIndex(task => \n  task.retry_data?.url === currentTask.retry_data?.url\n);\n\nif (taskIndex >= 0) {\n  errorQueue[taskIndex].retry_count = currentTask.retry_attempt;\n  errorQueue[taskIndex].last_error = retryResult.message || '重试失败';\n  errorQueue[taskIndex].last_retry_time = new Date().toISOString();\n  \n  // 如果已达最大重试次数，标记为失败\n  if (currentTask.retry_attempt >= 3) {\n    errorQueue[taskIndex].status = 'failed';\n    errorQueue[taskIndex].failed_time = new Date().toISOString();\n  }\n}\n\nstaticData.errorQueue = errorQueue;\n\nreturn {\n  json: {\n    status: currentTask.retry_attempt >= 3 ? 'max_retries_reached' : 'retry_failed',\n    message: currentTask.retry_attempt >= 3 ? '已达最大重试次数' : '重试失败，稍后再试',\n    url: currentTask.retry_data?.url,\n    retry_attempt: currentTask.retry_attempt,\n    error: retryResult.message\n  }\n};"
+      },
+      "id": "update-retry-count",
+      "name": "更新重试次数",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1570, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 添加新的失败任务到队列\nconst staticData = $getWorkflowStaticData('global');\nconst errorQueue = staticData.errorQueue || [];\nconst input = $input.first().json;\nconst newTask = input.body || input;\n\n// 检查是否已存在\nconst exists = errorQueue.some(task => \n  task.retry_data?.url === newTask.retry_data?.url\n);\n\nif (!exists && newTask.retry_data?.url) {\n  errorQueue.push({\n    id: Date.now().toString(),\n    ...newTask,\n    retry_count: 0,\n    added_time: new Date().toISOString(),\n    status: 'pending'\n  });\n  staticData.errorQueue = errorQueue;\n  \n  return {\n    json: {\n      status: 'added',\n      message: '已添加到重试队列',\n      url: newTask.retry_data?.url,\n      queue_size: errorQueue.length\n    }\n  };\n}\n\nreturn {\n  json: {\n    status: 'skipped',\n    message: exists ? '任务已在队列中' : '无效的任务数据',\n    url: newTask.retry_data?.url\n  }\n};"
+      },
+      "id": "add-to-queue",
+      "name": "添加到队列",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 500]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"status\": \"{{ $json.status }}\",\n  \"message\": \"{{ $json.message }}\",\n  \"url\": \"{{ $json.url || '' }}\",\n  \"queue_size\": {{ $json.queue_size || 0 }}\n}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "add-to-queue-response",
+      "name": "添加队列响应",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [690, 500]
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "wait-between-retry",
+      "name": "等待间隔",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1790, 200],
+      "webhookId": "wait-retry"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 没有有效重试数据\nreturn {\n  json: {\n    status: 'skipped',\n    message: '没有有效的重试数据',\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "id": "skip-invalid",
+      "name": "跳过无效任务",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 获取队列状态\nconst staticData = $getWorkflowStaticData('global');\nconst errorQueue = staticData.errorQueue || [];\n\nconst stats = {\n  total: errorQueue.length,\n  pending: errorQueue.filter(t => t.status === 'pending').length,\n  failed: errorQueue.filter(t => t.status === 'failed').length,\n  tasks: errorQueue.slice(0, 10)\n};\n\nreturn {\n  json: {\n    timestamp: new Date().toISOString(),\n    queue_stats: stats\n  }\n};"
+      },
+      "id": "queue-summary",
+      "name": "队列汇总",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2010, 200]
+    }
+  ],
+  "connections": {
+    "定时检查重试": {
+      "main": [
+        [
+          {
+            "node": "配置参数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "错误队列入口": {
+      "main": [
+        [
+          {
+            "node": "添加到队列",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "添加到队列": {
+      "main": [
+        [
+          {
+            "node": "添加队列响应",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "配置参数": {
+      "main": [
+        [
+          {
+            "node": "获取重试任务",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "获取重试任务": {
+      "main": [
+        [
+          {
+            "node": "检查重试数据",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查重试数据": {
+      "main": [
+        [
+          {
+            "node": "重试爬取",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "跳过无效任务",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "重试爬取": {
+      "main": [
+        [
+          {
+            "node": "检查重试结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查重试结果": {
+      "main": [
+        [
+          {
+            "node": "从队列移除",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "更新重试次数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "从队列移除": {
+      "main": [
+        [
+          {
+            "node": "等待间隔",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "更新重试次数": {
+      "main": [
+        [
+          {
+            "node": "等待间隔",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "等待间隔": {
+      "main": [
+        [
+          {
+            "node": "队列汇总",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "跳过无效任务": {
+      "main": [
+        [
+          {
+            "node": "队列汇总",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": {
+    "global": {
+      "errorQueue": []
+    }
+  },
+  "tags": [
+    {
+      "name": "knowledge-management"
+    },
+    {
+      "name": "error-handling"
+    }
+  ],
+  "triggerCount": 2,
+  "versionId": "2"
+}

@@ -1,0 +1,561 @@
+{
+  "name": "05-Ollama任务队列",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      },
+      "id": "schedule-check-ollama",
+      "name": "定时检测Ollama",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ollama-queue",
+        "options": {
+          "responseMode": "responseNode"
+        }
+      },
+      "id": "webhook-add-task",
+      "name": "添加任务入口",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 600],
+      "webhookId": "ollama-queue"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ollama-control",
+        "options": {
+          "responseMode": "responseNode"
+        }
+      },
+      "id": "webhook-control",
+      "name": "队列控制入口",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 800],
+      "webhookId": "ollama-control"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n  \"OLLAMA_URL\": \"http://192.168.1.100:11434\",\n  \"DEFAULT_MODEL\": \"qwen2.5:7b\"\n}",
+        "options": {}
+      },
+      "id": "config-node",
+      "name": "配置参数",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [470, 300],
+      "notesInFlow": true,
+      "notes": "修改 OLLAMA_URL 为你的 Win11 IP"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.OLLAMA_URL }}/api/tags",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "check-ollama-health",
+      "name": "检测Ollama可用性",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [690, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-ollama-available",
+              "leftValue": "={{ $json.models }}",
+              "rightValue": "",
+              "operator": {
+                "type": "array",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "is-ollama-available",
+      "name": "Ollama是否可用",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 检查队列状态和获取待处理任务\nconst staticData = $getWorkflowStaticData('global');\nconst ollamaQueue = staticData.ollamaQueue || [];\nconst queueStatus = staticData.queueStatus || 'running';\nconst config = $('配置参数').first().json;\n\n// 如果队列暂停，跳过处理\nif (queueStatus === 'paused') {\n  return {\n    json: {\n      status: 'paused',\n      message: '队列已暂停',\n      queue_size: ollamaQueue.length\n    }\n  };\n}\n\n// 获取待处理任务\nconst pendingTasks = ollamaQueue.filter(task => task.status === 'pending');\n\nif (pendingTasks.length === 0) {\n  return {\n    json: {\n      status: 'empty',\n      message: '没有待处理的任务',\n      queue_size: ollamaQueue.length\n    }\n  };\n}\n\n// 返回待处理任务（每次处理5个）\nreturn pendingTasks.slice(0, 5).map(task => ({\n  json: {\n    ...task,\n    config: config\n  }\n}));"
+      },
+      "id": "get-pending-tasks",
+      "name": "获取待处理任务",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-pending-tasks",
+              "leftValue": "={{ $json.content }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-has-tasks",
+      "name": "有待处理任务",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1350, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.config.OLLAMA_URL }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"{{ $json.model || $json.config.DEFAULT_MODEL }}\",\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"stream\": false,\n  \"options\": {\n    \"temperature\": 0.7,\n    \"num_predict\": 2048\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 300000
+        }
+      },
+      "id": "call-ollama",
+      "name": "调用Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1570, 100],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-ollama-response",
+              "leftValue": "={{ $json.response }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-ollama-result",
+      "name": "检查处理结果",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1790, 100]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 处理成功，更新任务状态\nconst staticData = $getWorkflowStaticData('global');\nconst ollamaQueue = staticData.ollamaQueue || [];\nconst currentTask = $('获取待处理任务').first().json;\nconst ollamaResponse = $input.first().json;\n\n// 更新任务状态\nconst taskIndex = ollamaQueue.findIndex(t => t.id === currentTask.id);\nif (taskIndex >= 0) {\n  ollamaQueue[taskIndex].status = 'completed';\n  ollamaQueue[taskIndex].completed_time = new Date().toISOString();\n  ollamaQueue[taskIndex].result = ollamaResponse.response;\n}\n\nstaticData.ollamaQueue = ollamaQueue;\n\nreturn {\n  json: {\n    task_id: currentTask.id,\n    task_type: currentTask.task_type,\n    url: currentTask.url,\n    result: ollamaResponse.response,\n    status: 'completed',\n    callback_url: currentTask.callback_url\n  }\n};"
+      },
+      "id": "process-success",
+      "name": "处理成功",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2010, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 处理失败，更新任务状态\nconst staticData = $getWorkflowStaticData('global');\nconst ollamaQueue = staticData.ollamaQueue || [];\nconst currentTask = $('获取待处理任务').first().json;\nconst errorResponse = $input.first().json;\n\nconst taskIndex = ollamaQueue.findIndex(t => t.id === currentTask.id);\nif (taskIndex >= 0) {\n  ollamaQueue[taskIndex].retry_count = (ollamaQueue[taskIndex].retry_count || 0) + 1;\n  ollamaQueue[taskIndex].last_error = errorResponse.error || '处理失败';\n  \n  if (ollamaQueue[taskIndex].retry_count >= 3) {\n    ollamaQueue[taskIndex].status = 'failed';\n    ollamaQueue[taskIndex].failed_time = new Date().toISOString();\n  }\n}\n\nstaticData.ollamaQueue = ollamaQueue;\n\nreturn {\n  json: {\n    status: 'failed',\n    task_id: currentTask.id,\n    error: errorResponse.error || '处理失败',\n    retry_count: ollamaQueue[taskIndex]?.retry_count\n  }\n};"
+      },
+      "id": "process-failure",
+      "name": "处理失败",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2010, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Ollama 不可用\nreturn {\n  json: {\n    status: 'ollama_unavailable',\n    message: 'Ollama 服务不可用，稍后重试',\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "id": "ollama-unavailable",
+      "name": "Ollama不可用",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 添加新任务到队列\nconst staticData = $getWorkflowStaticData('global');\nconst ollamaQueue = staticData.ollamaQueue || [];\nconst input = $input.first().json;\nconst body = input.body || input;\n\nif (!body.content && !body.url) {\n  return {\n    json: {\n      success: false,\n      error: 'content 或 url 参数不能为空'\n    }\n  };\n}\n\n// 构建默认 prompt\nfunction buildDefaultPrompt(taskType, content) {\n  const prompts = {\n    'summarize': `请用中文总结以下内容的核心要点：\\n1. 一句话总结\\n2. 关键要点（3-5条）\\n3. 相关技术标签\\n\\n内容：\\n${content}`,\n    'analyze': `请对以下技术内容进行深度分析：\\n1. 技术原理\\n2. 应用场景\\n3. 优缺点\\n4. 相关技术\\n\\n内容：\\n${content}`,\n    'extract_tags': `请从以下内容中提取相关的技术标签（用逗号分隔）：\\n${content}`\n  };\n  return prompts[taskType] || prompts['summarize'];\n}\n\nconst config = $('配置参数').first().json;\nconst task = {\n  id: Date.now().toString(),\n  task_type: body.task_type || 'summarize',\n  url: body.url,\n  content: body.content,\n  model: body.model || config.DEFAULT_MODEL || 'qwen2.5:7b',\n  prompt: body.prompt || buildDefaultPrompt(body.task_type || 'summarize', body.content),\n  callback_url: body.callback_url,\n  status: 'pending',\n  added_time: new Date().toISOString(),\n  retry_count: 0,\n  extra_data: body.extra_data || {}\n};\n\nollamaQueue.push(task);\nstaticData.ollamaQueue = ollamaQueue;\n\nreturn {\n  json: {\n    success: true,\n    message: '任务已添加到队列',\n    task_id: task.id,\n    queue_size: ollamaQueue.length,\n    queue_position: ollamaQueue.filter(t => t.status === 'pending').length\n  }\n};"
+      },
+      "id": "add-task-to-queue",
+      "name": "添加任务",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 600]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "add-task-response",
+      "name": "添加任务响应",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [690, 600]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 队列控制\nconst staticData = $getWorkflowStaticData('global');\nconst ollamaQueue = staticData.ollamaQueue || [];\nconst input = $input.first().json;\nconst body = input.body || input;\nconst action = body.action;\n\nswitch (action) {\n  case 'pause':\n    staticData.queueStatus = 'paused';\n    return { json: { success: true, message: '队列已暂停', status: 'paused' } };\n    \n  case 'resume':\n    staticData.queueStatus = 'running';\n    return { json: { success: true, message: '队列已恢复', status: 'running' } };\n    \n  case 'clear':\n    const clearType = body.clear_type || 'completed';\n    if (clearType === 'all') {\n      staticData.ollamaQueue = [];\n    } else if (clearType === 'completed') {\n      staticData.ollamaQueue = ollamaQueue.filter(t => t.status !== 'completed');\n    } else if (clearType === 'failed') {\n      staticData.ollamaQueue = ollamaQueue.filter(t => t.status !== 'failed');\n    }\n    return { json: { success: true, message: `已清除 ${clearType} 任务`, remaining: staticData.ollamaQueue.length } };\n    \n  case 'remove':\n    staticData.ollamaQueue = ollamaQueue.filter(t => t.id !== body.task_id);\n    return { json: { success: true, message: '任务已移除', task_id: body.task_id } };\n    \n  case 'status':\n  default:\n    return {\n      json: {\n        success: true,\n        queue_status: staticData.queueStatus || 'running',\n        total: ollamaQueue.length,\n        pending: ollamaQueue.filter(t => t.status === 'pending').length,\n        completed: ollamaQueue.filter(t => t.status === 'completed').length,\n        failed: ollamaQueue.filter(t => t.status === 'failed').length,\n        recent_tasks: ollamaQueue.slice(-10).reverse()\n      }\n    };\n}"
+      },
+      "id": "queue-control",
+      "name": "队列控制",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 800]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "queue-control-response",
+      "name": "队列控制响应",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [690, 800]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback_url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "send-callback",
+      "name": "发送回调",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2230, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "id": "wait-between-tasks",
+      "name": "任务间隔",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2450, 100],
+      "webhookId": "wait-ollama"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 没有任务需要处理\nreturn {\n  json: {\n    status: 'no_tasks',\n    message: '没有待处理的任务或队列已暂停',\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "id": "no-tasks",
+      "name": "无任务处理",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1570, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 执行完成汇总\nconst staticData = $getWorkflowStaticData('global');\nconst ollamaQueue = staticData.ollamaQueue || [];\n\nreturn {\n  json: {\n    status: 'batch_completed',\n    timestamp: new Date().toISOString(),\n    queue_stats: {\n      total: ollamaQueue.length,\n      pending: ollamaQueue.filter(t => t.status === 'pending').length,\n      completed: ollamaQueue.filter(t => t.status === 'completed').length,\n      failed: ollamaQueue.filter(t => t.status === 'failed').length\n    }\n  }\n};"
+      },
+      "id": "batch-summary",
+      "name": "批次汇总",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2670, 100]
+    }
+  ],
+  "connections": {
+    "定时检测Ollama": {
+      "main": [
+        [
+          {
+            "node": "配置参数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "添加任务入口": {
+      "main": [
+        [
+          {
+            "node": "添加任务",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "添加任务": {
+      "main": [
+        [
+          {
+            "node": "添加任务响应",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "队列控制入口": {
+      "main": [
+        [
+          {
+            "node": "队列控制",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "队列控制": {
+      "main": [
+        [
+          {
+            "node": "队列控制响应",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "配置参数": {
+      "main": [
+        [
+          {
+            "node": "检测Ollama可用性",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检测Ollama可用性": {
+      "main": [
+        [
+          {
+            "node": "Ollama是否可用",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama是否可用": {
+      "main": [
+        [
+          {
+            "node": "获取待处理任务",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ollama不可用",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "获取待处理任务": {
+      "main": [
+        [
+          {
+            "node": "有待处理任务",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "有待处理任务": {
+      "main": [
+        [
+          {
+            "node": "调用Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "无任务处理",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "调用Ollama": {
+      "main": [
+        [
+          {
+            "node": "检查处理结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查处理结果": {
+      "main": [
+        [
+          {
+            "node": "处理成功",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "处理失败",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "处理成功": {
+      "main": [
+        [
+          {
+            "node": "发送回调",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "处理失败": {
+      "main": [
+        [
+          {
+            "node": "任务间隔",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "发送回调": {
+      "main": [
+        [
+          {
+            "node": "任务间隔",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "任务间隔": {
+      "main": [
+        [
+          {
+            "node": "批次汇总",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "无任务处理": {
+      "main": [
+        [
+          {
+            "node": "批次汇总",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": {
+    "global": {
+      "ollamaQueue": [],
+      "queueStatus": "running"
+    }
+  },
+  "tags": [
+    {
+      "name": "knowledge-management"
+    },
+    {
+      "name": "ollama"
+    }
+  ],
+  "triggerCount": 3,
+  "versionId": "2"
+}

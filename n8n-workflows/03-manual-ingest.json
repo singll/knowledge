@@ -1,0 +1,404 @@
+{
+  "name": "03-手动URL入库",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "manual-ingest",
+        "options": {
+          "responseMode": "responseNode"
+        }
+      },
+      "id": "webhook-manual",
+      "name": "Webhook 手动触发",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "manual-ingest"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={\n  \"config\": {\n    \"KNOWLEDGE_MGMT_URL\": \"http://knowledge-backend:5000\",\n    \"FIRECRAWL_API_URL\": \"http://firecrawl:3002\",\n    \"RAGFLOW_DATASET_ID_SECURITY\": \"YOUR_SECURITY_DATASET_ID\",\n    \"RAGFLOW_DATASET_ID_NEWS\": \"YOUR_NEWS_DATASET_ID\",\n    \"RAGFLOW_DATASET_ID_AI\": \"YOUR_AI_DATASET_ID\",\n    \"RAGFLOW_DATASET_ID_DEV\": \"YOUR_DEV_DATASET_ID\"\n  },\n  \"input\": {{ JSON.stringify($json.body || $json) }}\n}",
+        "options": {}
+      },
+      "id": "config-node",
+      "name": "配置参数",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [470, 300],
+      "notesInFlow": true,
+      "notes": "修改此节点中的配置值"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-url-exists",
+              "leftValue": "={{ $json.input.url }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "validate-url",
+      "name": "验证URL参数",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 规范化输入参数\nconst data = $input.first().json;\nconst body = data.input;\nconst config = data.config;\n\n// 数据集映射（根据类别选择知识库）\nconst datasetMapping = {\n  'security': config.RAGFLOW_DATASET_ID_SECURITY,\n  'news': config.RAGFLOW_DATASET_ID_NEWS,\n  'ai': config.RAGFLOW_DATASET_ID_AI,\n  'dev': config.RAGFLOW_DATASET_ID_DEV,\n  'default': config.RAGFLOW_DATASET_ID_SECURITY\n};\n\n// 获取目标知识库\nlet dataset = body.dataset || body.category || 'default';\nlet datasetId = body.dataset_id || datasetMapping[dataset] || datasetMapping['default'];\n\n// 处理标签\nlet tags = body.tags || [];\nif (typeof tags === 'string') {\n  tags = tags.split(',').map(t => t.trim()).filter(t => t);\n}\n\nreturn {\n  json: {\n    url: body.url,\n    dataset_id: datasetId,\n    dataset: dataset,\n    tags: tags,\n    source: 'manual',\n    priority: body.priority || 'high',\n    extra_data: body.extra_data || {},\n    config: config\n  }\n};"
+      },
+      "id": "normalize-input",
+      "name": "规范化输入",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.config.FIRECRAWL_API_URL }}/v1/scrape",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\": \"{{ $json.url }}\",\n  \"formats\": [\"markdown\", \"html\"],\n  \"onlyMainContent\": true,\n  \"waitFor\": 3000,\n  \"timeout\": 30000,\n  \"removeBase64Images\": true,\n  \"blockAds\": true\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "firecrawl-scrape",
+      "name": "Firecrawl 爬取",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1130, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "firecrawl-auth",
+          "name": "Firecrawl API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-scrape-success",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-scrape",
+      "name": "检查爬取结果",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1350, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 处理爬取内容\nconst scrapeResult = $input.first().json;\nconst normalizedInput = $('规范化输入').first().json;\n\nconst data = scrapeResult.data || {};\nconst metadata = data.metadata || {};\n\n// 生成文件名\nconst title = metadata.title || metadata.ogTitle || '未知标题';\nconst cleanTitle = title.replace(/[^a-zA-Z0-9\\u4e00-\\u9fa5\\s-]/g, '').substring(0, 100);\nconst timestamp = new Date().toISOString().replace(/[:.]/g, '-');\nconst filename = `${cleanTitle}_${timestamp}.md`;\n\n// 构建文档内容\nlet content = '';\ncontent += `# ${title}\\n\\n`;\ncontent += `> **来源**: ${normalizedInput.url}\\n`;\ncontent += `> **入库时间**: ${new Date().toLocaleString('zh-CN')}\\n`;\ncontent += `> **入库方式**: 手动添加\\n`;\n\nif (metadata.author) {\n  content += `> **作者**: ${metadata.author}\\n`;\n}\nif (metadata.description) {\n  content += `> **摘要**: ${metadata.description}\\n`;\n}\n\ncontent += '\\n---\\n\\n';\ncontent += data.markdown || data.content || '内容解析失败';\n\nif (normalizedInput.tags && normalizedInput.tags.length > 0) {\n  content += `\\n\\n---\\n**标签**: ${normalizedInput.tags.join(', ')}`;\n}\n\nreturn {\n  json: {\n    url: normalizedInput.url,\n    title: title,\n    filename: filename,\n    content: content,\n    dataset_id: normalizedInput.dataset_id,\n    tags: normalizedInput.tags,\n    config: normalizedInput.config,\n    metadata: {\n      original_url: normalizedInput.url,\n      crawl_time: new Date().toISOString(),\n      content_length: content.length,\n      title: title,\n      author: metadata.author,\n      description: metadata.description\n    }\n  }\n};"
+      },
+      "id": "process-content",
+      "name": "处理内容",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1570, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.config.KNOWLEDGE_MGMT_URL }}/api/ragflow/upload/string",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"dataset_id\": \"{{ $json.dataset_id }}\",\n  \"content\": {{ JSON.stringify($json.content) }},\n  \"filename\": \"{{ $json.filename }}\",\n  \"parser_id\": \"naive\",\n  \"run\": \"1\",\n  \"wait_for_completion\": false\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "upload-ragflow",
+      "name": "上传到RagFlow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1790, 100],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-upload-success",
+              "leftValue": "={{ $json.code }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-upload",
+      "name": "检查上传结果",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2010, 100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"文章已成功入库\",\n  \"data\": {\n    \"url\": \"{{ $('处理内容').first().json.url }}\",\n    \"title\": \"{{ $('处理内容').first().json.title }}\",\n    \"document_id\": \"{{ $json.data?.document_id }}\",\n    \"dataset_id\": \"{{ $('处理内容').first().json.dataset_id }}\",\n    \"content_length\": {{ $('处理内容').first().json.metadata?.content_length }},\n    \"crawl_time\": \"{{ $('处理内容').first().json.metadata?.crawl_time }}\"\n  }\n}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "success-response",
+      "name": "成功响应",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2230, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": false,\n  \"error\": \"upload_failed\",\n  \"message\": \"上传到知识库失败: {{ $json.message || '未知错误' }}\",\n  \"data\": {\n    \"url\": \"{{ $('处理内容').first().json.url }}\",\n    \"title\": \"{{ $('处理内容').first().json.title }}\"\n  }\n}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "upload-error-response",
+      "name": "上传失败响应",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2230, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": false,\n  \"error\": \"scrape_failed\",\n  \"message\": \"网页爬取失败: {{ $json.error || '无法获取网页内容' }}\",\n  \"data\": {\n    \"url\": \"{{ $('规范化输入').first().json.url }}\"\n  }\n}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "scrape-error-response",
+      "name": "爬取失败响应",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1570, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": false,\n  \"error\": \"invalid_input\",\n  \"message\": \"URL参数不能为空\"\n}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "input-error-response",
+      "name": "参数错误响应",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [910, 400]
+    }
+  ],
+  "connections": {
+    "Webhook 手动触发": {
+      "main": [
+        [
+          {
+            "node": "配置参数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "配置参数": {
+      "main": [
+        [
+          {
+            "node": "验证URL参数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "验证URL参数": {
+      "main": [
+        [
+          {
+            "node": "规范化输入",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "参数错误响应",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "规范化输入": {
+      "main": [
+        [
+          {
+            "node": "Firecrawl 爬取",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Firecrawl 爬取": {
+      "main": [
+        [
+          {
+            "node": "检查爬取结果",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "爬取失败响应",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查爬取结果": {
+      "main": [
+        [
+          {
+            "node": "处理内容",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "爬取失败响应",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "处理内容": {
+      "main": [
+        [
+          {
+            "node": "上传到RagFlow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "上传到RagFlow": {
+      "main": [
+        [
+          {
+            "node": "检查上传结果",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "上传失败响应",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查上传结果": {
+      "main": [
+        [
+          {
+            "node": "成功响应",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "上传失败响应",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "knowledge-management"
+    },
+    {
+      "name": "webhook"
+    }
+  ],
+  "triggerCount": 1,
+  "versionId": "2"
+}

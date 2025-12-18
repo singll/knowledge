@@ -1,0 +1,501 @@
+{
+  "name": "01-定时RSS数据源抓取",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 6
+            },
+            {
+              "triggerAtHour": 18
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "定时触发器",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n  \"KNOWLEDGE_MGMT_URL\": \"http://knowledge-backend:5000\",\n  \"FIRECRAWL_API_URL\": \"http://firecrawl:3002\",\n  \"N8N_WEBHOOK_URL\": \"http://n8n:5678\",\n  \"RAGFLOW_DATASET_ID_SECURITY\": \"YOUR_SECURITY_DATASET_ID\",\n  \"RAGFLOW_DATASET_ID_NEWS\": \"YOUR_NEWS_DATASET_ID\",\n  \"RAGFLOW_DATASET_ID_AI\": \"YOUR_AI_DATASET_ID\",\n  \"RAGFLOW_DATASET_ID_DEV\": \"YOUR_DEV_DATASET_ID\"\n}",
+        "options": {}
+      },
+      "id": "config-node",
+      "name": "配置参数",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [470, 300],
+      "notesInFlow": true,
+      "notes": "修改此节点中的配置值"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.KNOWLEDGE_MGMT_URL }}/api/rss",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "is_active",
+              "value": "true"
+            },
+            {
+              "name": "per_page",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "get-rss-list",
+      "name": "获取RSS订阅列表",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [690, 200]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('配置参数').item.json.KNOWLEDGE_MGMT_URL }}/api/datasources",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "is_active",
+              "value": "true"
+            },
+            {
+              "name": "per_page",
+              "value": "100"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "get-datasource-list",
+      "name": "获取数据源列表",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [690, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 处理 RSS 列表\nconst rssResponse = $input.first().json;\nconst config = $('配置参数').first().json;\nconst rssItems = rssResponse.data?.items || rssResponse.items || [];\n\nconst result = [];\nfor (const rss of rssItems) {\n  if (rss.is_active && rss.url) {\n    result.push({\n      json: {\n        id: rss.id,\n        name: rss.name,\n        url: rss.url,\n        category: rss.category,\n        tags: (rss.tags || []).map(t => t.name),\n        last_fetched: rss.last_fetched,\n        type: 'rss',\n        config: config\n      }\n    });\n  }\n}\n\nreturn result;"
+      },
+      "id": "process-rss-list",
+      "name": "处理RSS列表",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {
+          "ignoreSSL": true
+        }
+      },
+      "id": "rss-feed-read",
+      "name": "读取RSS Feed",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [1130, 200],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 处理 RSS Feed 条目，过滤已处理的文章\nconst items = $input.all();\nconst rssInfo = $('处理RSS列表').first().json;\n\n// 计算 6 小时前的时间（过滤旧文章）\nconst sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);\n\n// 如果有 last_fetched，使用它作为过滤时间\nlet filterTime = sixHoursAgo;\nif (rssInfo.last_fetched) {\n  const lastFetched = new Date(rssInfo.last_fetched);\n  if (lastFetched > filterTime) {\n    filterTime = lastFetched;\n  }\n}\n\nconst result = [];\nfor (const item of items) {\n  const pubDate = item.json.pubDate ? new Date(item.json.pubDate) : new Date();\n  \n  // 只处理新文章\n  if (pubDate > filterTime) {\n    result.push({\n      json: {\n        url: item.json.link,\n        title: item.json.title,\n        pubDate: pubDate.toISOString(),\n        description: item.json.contentSnippet || item.json.description,\n        source: 'rss',\n        source_name: rssInfo.name,\n        source_id: rssInfo.id,\n        category: rssInfo.category,\n        tags: rssInfo.tags,\n        config: rssInfo.config\n      }\n    });\n  }\n}\n\n// 限制每个 RSS 源最多处理 10 篇文章\nreturn result.slice(0, 10);"
+      },
+      "id": "filter-rss-items",
+      "name": "过滤RSS条目",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 200]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "batch-rss-items",
+      "name": "分批处理",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1570, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.config.N8N_WEBHOOK_URL }}/webhook/core-crawler",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\": \"{{ $json.url }}\",\n  \"source\": \"rss\",\n  \"source_name\": \"{{ $json.source_name }}\",\n  \"category\": \"{{ $json.category || 'security' }}\",\n  \"tags\": {{ JSON.stringify($json.tags || []) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "call-core-crawler-rss",
+      "name": "调用核心爬取工作流",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1790, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "amount": 3,
+        "unit": "seconds"
+      },
+      "id": "wait-between-rss",
+      "name": "等待间隔",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2010, 200],
+      "webhookId": "wait-rss"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $('处理RSS列表').first().json.config.KNOWLEDGE_MGMT_URL }}/api/rss/{{ $('处理RSS列表').first().json.id }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"last_fetched\": \"{{ new Date().toISOString() }}\"\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "update-rss-last-fetched",
+      "name": "更新RSS抓取时间",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2230, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// 处理数据源列表\nconst dsResponse = $input.first().json;\nconst config = $('配置参数').first().json;\nconst dsItems = dsResponse.data?.items || dsResponse.items || [];\n\nconst result = [];\nfor (const ds of dsItems) {\n  if (ds.is_active && ds.url) {\n    result.push({\n      json: {\n        id: ds.id,\n        name: ds.name,\n        url: ds.url,\n        type: ds.type,\n        category: ds.category,\n        tags: (ds.tags || []).map(t => t.name),\n        source: 'datasource',\n        config: config\n      }\n    });\n  }\n}\n\nreturn result;"
+      },
+      "id": "process-datasource-list",
+      "name": "处理数据源列表",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 400]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "batch-datasource",
+      "name": "分批处理数据源",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1130, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.config.N8N_WEBHOOK_URL }}/webhook/core-crawler",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\": \"{{ $json.url }}\",\n  \"source\": \"datasource\",\n  \"source_name\": \"{{ $json.name }}\",\n  \"category\": \"{{ $json.category || 'security' }}\",\n  \"tags\": {{ JSON.stringify($json.tags || []) }}\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "id": "call-core-crawler-ds",
+      "name": "爬取数据源",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1350, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "amount": 3,
+        "unit": "seconds"
+      },
+      "id": "wait-between-ds",
+      "name": "数据源等待间隔",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1570, 400],
+      "webhookId": "wait-ds"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 汇总执行结果\nconst timestamp = new Date().toISOString();\n\nreturn {\n  json: {\n    status: 'completed',\n    message: '定时抓取任务执行完成',\n    timestamp: timestamp,\n    summary: {\n      rss_processed: true,\n      datasource_processed: true\n    }\n  }\n};"
+      },
+      "id": "execution-summary",
+      "name": "执行汇总",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1790, 600]
+    },
+    {
+      "parameters": {
+        "jsCode": "// RSS 读取失败处理\nconst rssInfo = $('处理RSS列表').first().json;\nconsole.log(`RSS 读取失败: ${rssInfo.name} - ${rssInfo.url}`);\n\nreturn {\n  json: {\n    error: 'rss_read_failed',\n    rss_name: rssInfo.name,\n    rss_url: rssInfo.url,\n    timestamp: new Date().toISOString(),\n    config: rssInfo.config\n  }\n};"
+      },
+      "id": "rss-read-error",
+      "name": "RSS读取失败",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 80]
+    }
+  ],
+  "connections": {
+    "定时触发器": {
+      "main": [
+        [
+          {
+            "node": "配置参数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "配置参数": {
+      "main": [
+        [
+          {
+            "node": "获取RSS订阅列表",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "获取数据源列表",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "获取RSS订阅列表": {
+      "main": [
+        [
+          {
+            "node": "处理RSS列表",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "获取数据源列表": {
+      "main": [
+        [
+          {
+            "node": "处理数据源列表",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "处理RSS列表": {
+      "main": [
+        [
+          {
+            "node": "读取RSS Feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "读取RSS Feed": {
+      "main": [
+        [
+          {
+            "node": "过滤RSS条目",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "RSS读取失败",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "过滤RSS条目": {
+      "main": [
+        [
+          {
+            "node": "分批处理",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "分批处理": {
+      "main": [
+        [
+          {
+            "node": "更新RSS抓取时间",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "调用核心爬取工作流",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "调用核心爬取工作流": {
+      "main": [
+        [
+          {
+            "node": "等待间隔",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "等待间隔": {
+      "main": [
+        [
+          {
+            "node": "分批处理",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "更新RSS抓取时间": {
+      "main": [
+        [
+          {
+            "node": "执行汇总",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "处理数据源列表": {
+      "main": [
+        [
+          {
+            "node": "分批处理数据源",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "分批处理数据源": {
+      "main": [
+        [
+          {
+            "node": "执行汇总",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "爬取数据源",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "爬取数据源": {
+      "main": [
+        [
+          {
+            "node": "数据源等待间隔",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "数据源等待间隔": {
+      "main": [
+        [
+          {
+            "node": "分批处理数据源",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "RSS读取失败": {
+      "main": [
+        [
+          {
+            "node": "更新RSS抓取时间",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "knowledge-management"
+    },
+    {
+      "name": "scheduled"
+    }
+  ],
+  "triggerCount": 1,
+  "versionId": "2"
+}

@@ -1,0 +1,351 @@
+{
+  "name": "07-AI内容总结",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-summarize",
+        "options": {
+          "responseMode": "responseNode"
+        }
+      },
+      "id": "webhook-summarize",
+      "name": "AI总结入口",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "webhookId": "ai-summarize"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={\n  \"config\": {\n    \"OLLAMA_URL\": \"http://192.168.1.100:11434\",\n    \"DEFAULT_MODEL\": \"qwen2.5:7b\",\n    \"DEEPSEEK_API_URL\": \"https://api.deepseek.com\"\n  },\n  \"input\": {{ JSON.stringify($json.body || $json) }}\n}",
+        "options": {}
+      },
+      "id": "config-node",
+      "name": "配置参数",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [470, 300],
+      "notesInFlow": true,
+      "notes": "修改此节点中的配置值"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 规范化输入\nconst data = $input.first().json;\nconst body = data.input;\nconst config = data.config;\n\nif (!body.content && !body.url) {\n  throw new Error('content 或 url 参数不能为空');\n}\n\nconst provider = body.provider || 'ollama';\nconst defaultModels = {\n  'openai': 'gpt-4o-mini',\n  'deepseek': 'deepseek-chat',\n  'ollama': config.DEFAULT_MODEL || 'qwen2.5:7b'\n};\nconst model = body.model || defaultModels[provider];\n\nconst taskType = body.task_type || 'summarize';\nconst promptTemplates = {\n  'summarize': `请用中文总结以下文章的核心内容：\\n\\n## 一句话总结\\n[简洁概括]\\n\\n## 关键要点\\n1. [要点1]\\n2. [要点2]\\n3. [要点3]\\n\\n## 技术标签\\n[相关标签]\\n\\n文章内容：\\n`,\n  'security_analysis': `请从网络安全角度分析以下内容：\\n\\n## 安全要点\\n[涉及的安全概念]\\n\\n## 攻防技术\\n[详细说明]\\n\\n## 实践建议\\n[可操作建议]\\n\\n内容：\\n`,\n  'extract_code': `请提取关键代码并解释：\\n\\n## 代码片段\\n[关键代码]\\n\\n## 代码解释\\n[功能说明]\\n\\n内容：\\n`\n};\n\nconst prompt = body.prompt || (promptTemplates[taskType] + (body.content || ''));\n\nreturn {\n  json: {\n    content: body.content,\n    url: body.url,\n    provider: provider,\n    model: model,\n    task_type: taskType,\n    prompt: prompt,\n    callback_url: body.callback_url,\n    config: config\n  }\n};"
+      },
+      "id": "normalize-input",
+      "name": "规范化输入",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-ollama",
+              "leftValue": "={{ $json.provider }}",
+              "rightValue": "ollama",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-provider",
+      "name": "是Ollama?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.config.OLLAMA_URL }}/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"{{ $json.model }}\",\n  \"prompt\": {{ JSON.stringify($json.prompt) }},\n  \"stream\": false,\n  \"options\": {\n    \"temperature\": 0.7,\n    \"num_predict\": 2048\n  }\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 300000
+        }
+      },
+      "id": "ollama-chat",
+      "name": "Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1130, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.config.DEEPSEEK_API_URL }}/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"{{ $json.model || 'deepseek-chat' }}\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.prompt) }}\n    }\n  ],\n  \"temperature\": 0.7,\n  \"max_tokens\": 2048\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "deepseek-chat",
+      "name": "DeepSeek",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1130, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "deepseek-auth",
+          "name": "DeepSeek API"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// 处理 Ollama 响应\nconst response = $input.first().json;\nconst inputData = $('规范化输入').first().json;\n\nreturn {\n  json: {\n    success: !!response.response,\n    provider: 'ollama',\n    model: inputData.model,\n    task_type: inputData.task_type,\n    result: response.response || '',\n    url: inputData.url,\n    callback_url: inputData.callback_url\n  }\n};"
+      },
+      "id": "process-ollama",
+      "name": "处理Ollama响应",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 处理 DeepSeek 响应\nconst response = $input.first().json;\nconst inputData = $('规范化输入').first().json;\n\nlet result = '';\nif (response.choices && response.choices[0]) {\n  result = response.choices[0].message?.content || '';\n}\n\nreturn {\n  json: {\n    success: !!result,\n    provider: 'deepseek',\n    model: inputData.model,\n    task_type: inputData.task_type,\n    result: result,\n    url: inputData.url,\n    callback_url: inputData.callback_url\n  }\n};"
+      },
+      "id": "process-deepseek",
+      "name": "处理DeepSeek响应",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-callback",
+              "leftValue": "={{ $json.callback_url }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-callback",
+      "name": "需要回调？",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1570, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback_url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({success: $json.success, result: $json.result, provider: $json.provider, task_type: $json.task_type}) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "send-callback",
+      "name": "发送回调",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1790, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": {{ $json.success }},\n  \"provider\": \"{{ $json.provider }}\",\n  \"model\": \"{{ $json.model }}\",\n  \"task_type\": \"{{ $json.task_type }}\",\n  \"result\": {{ JSON.stringify($json.result) }}\n}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-success",
+      "name": "返回成功",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2010, 300]
+    }
+  ],
+  "connections": {
+    "AI总结入口": {
+      "main": [
+        [
+          {
+            "node": "配置参数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "配置参数": {
+      "main": [
+        [
+          {
+            "node": "规范化输入",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "规范化输入": {
+      "main": [
+        [
+          {
+            "node": "是Ollama?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "是Ollama?": {
+      "main": [
+        [
+          {
+            "node": "Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "DeepSeek",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama": {
+      "main": [
+        [
+          {
+            "node": "处理Ollama响应",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DeepSeek": {
+      "main": [
+        [
+          {
+            "node": "处理DeepSeek响应",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "处理Ollama响应": {
+      "main": [
+        [
+          {
+            "node": "需要回调？",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "处理DeepSeek响应": {
+      "main": [
+        [
+          {
+            "node": "需要回调？",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "需要回调？": {
+      "main": [
+        [
+          {
+            "node": "发送回调",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "返回成功",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "发送回调": {
+      "main": [
+        [
+          {
+            "node": "返回成功",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "knowledge-management"
+    },
+    {
+      "name": "ai"
+    }
+  ],
+  "triggerCount": 1,
+  "versionId": "2"
+}

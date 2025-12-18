@@ -1,0 +1,393 @@
+{
+  "name": "06-系统健康监控",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "schedule-health-check",
+      "name": "定时健康检查",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{\n  \"KNOWLEDGE_MGMT_URL\": \"http://knowledge-backend:5000\",\n  \"FIRECRAWL_API_URL\": \"http://firecrawl:3002\",\n  \"RAGFLOW_URL\": \"http://ragflow:9380\",\n  \"OLLAMA_URL\": \"http://192.168.1.100:11434\"\n}",
+        "options": {}
+      },
+      "id": "config-node",
+      "name": "配置参数",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [470, 300],
+      "notesInFlow": true,
+      "notes": "修改此节点中的服务URL"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.KNOWLEDGE_MGMT_URL }}/health",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "check-knowledge-mgmt",
+      "name": "检查Knowledge-Mgmt",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 150],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('配置参数').item.json.FIRECRAWL_API_URL }}/",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "check-firecrawl",
+      "name": "检查Firecrawl",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('配置参数').item.json.RAGFLOW_URL }}/api/v1/datasets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "check-ragflow",
+      "name": "检查RagFlow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 450],
+      "continueOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ragflow-auth",
+          "name": "RagFlow API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('配置参数').item.json.OLLAMA_URL }}/api/tags",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "check-ollama",
+      "name": "检查Ollama",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 600],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 4,
+        "options": {}
+      },
+      "id": "merge-health-checks",
+      "name": "合并检查结果",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [970, 370]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 汇总健康检查结果\nconst config = $('配置参数').first().json;\nconst knowledgeMgmt = $('检查Knowledge-Mgmt').first();\nconst firecrawl = $('检查Firecrawl').first();\nconst ragflow = $('检查RagFlow').first();\nconst ollama = $('检查Ollama').first();\n\nconst staticData = $getWorkflowStaticData('global');\nconst previousStatus = staticData.lastStatus || {};\n\nconst services = {\n  knowledge_mgmt: {\n    name: 'Knowledge Management',\n    status: knowledgeMgmt.json?.status === 'healthy' || knowledgeMgmt.json?.code === 0 ? 'healthy' : 'unhealthy',\n    url: config.KNOWLEDGE_MGMT_URL\n  },\n  firecrawl: {\n    name: 'Firecrawl',\n    status: !firecrawl.json?.error ? 'healthy' : 'unhealthy',\n    url: config.FIRECRAWL_API_URL\n  },\n  ragflow: {\n    name: 'RagFlow',\n    status: ragflow.json?.code === 0 || ragflow.json?.data ? 'healthy' : 'unhealthy',\n    url: config.RAGFLOW_URL\n  },\n  ollama: {\n    name: 'Ollama (Local AI)',\n    status: ollama.json?.models ? 'healthy' : 'offline',\n    models: ollama.json?.models?.map(m => m.name) || [],\n    url: config.OLLAMA_URL\n  }\n};\n\n// 检查状态变化\nconst statusChanges = [];\nfor (const [key, service] of Object.entries(services)) {\n  if (previousStatus[key] && previousStatus[key].status !== service.status) {\n    statusChanges.push({\n      service: service.name,\n      previous: previousStatus[key].status,\n      current: service.status\n    });\n  }\n}\n\nstaticData.lastStatus = services;\nstaticData.lastCheckTime = new Date().toISOString();\n\nconst healthyCount = Object.values(services).filter(s => s.status === 'healthy').length;\nconst totalCount = Object.keys(services).length;\nconst overallStatus = healthyCount >= 3 ? 'healthy' : healthyCount >= 2 ? 'degraded' : 'unhealthy';\n\nreturn {\n  json: {\n    timestamp: new Date().toISOString(),\n    overall_status: overallStatus,\n    healthy_services: `${healthyCount}/${totalCount}`,\n    services: services,\n    status_changes: statusChanges,\n    alerts: statusChanges.filter(c => c.current === 'unhealthy').map(c => \n      `${c.service} 状态从 ${c.previous} 变为 ${c.current}`\n    )\n  }\n};"
+      },
+      "id": "aggregate-health",
+      "name": "汇总健康状态",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1190, 370]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-alerts",
+              "leftValue": "={{ $json.alerts?.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-alerts",
+      "name": "有告警？",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1190, 380]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 发送告警通知\nconst healthData = $input.first().json;\n\nconst alertMessage = {\n  title: '知识管理系统健康告警',\n  timestamp: healthData.timestamp,\n  overall_status: healthData.overall_status,\n  alerts: healthData.alerts,\n  services: healthData.services\n};\n\nconsole.log('健康告警:', JSON.stringify(alertMessage, null, 2));\n\nreturn {\n  json: {\n    alert_sent: true,\n    message: alertMessage\n  }\n};"
+      },
+      "id": "send-alert",
+      "name": "发送告警",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1410, 280]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 记录健康检查日志\nconst healthData = $input.first().json;\nconst staticData = $getWorkflowStaticData('global');\nconst history = staticData.healthHistory || [];\n\nhistory.push({\n  timestamp: healthData.timestamp,\n  overall_status: healthData.overall_status,\n  healthy_services: healthData.healthy_services\n});\n\nif (history.length > 100) {\n  history.shift();\n}\n\nstaticData.healthHistory = history;\n\nreturn {\n  json: {\n    logged: true,\n    timestamp: healthData.timestamp,\n    status: healthData.overall_status\n  }\n};"
+      },
+      "id": "log-health",
+      "name": "记录日志",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1410, 480]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "health-status",
+        "options": {
+          "responseMode": "responseNode"
+        }
+      },
+      "id": "webhook-health-api",
+      "name": "健康状态API",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 600],
+      "webhookId": "health-status"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 返回当前健康状态\nconst staticData = $getWorkflowStaticData('global');\nconst lastStatus = staticData.lastStatus || {};\nconst lastCheckTime = staticData.lastCheckTime;\nconst healthHistory = staticData.healthHistory || [];\n\nreturn {\n  json: {\n    last_check_time: lastCheckTime,\n    services: lastStatus,\n    history_summary: {\n      total_checks: healthHistory.length,\n      last_10: healthHistory.slice(-10)\n    }\n  }\n};"
+      },
+      "id": "get-current-status",
+      "name": "获取当前状态",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 600]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-health",
+      "name": "返回健康状态",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [720, 600]
+    }
+  ],
+  "connections": {
+    "定时健康检查": {
+      "main": [
+        [
+          {
+            "node": "配置参数",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "配置参数": {
+      "main": [
+        [
+          {
+            "node": "检查Knowledge-Mgmt",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "检查Firecrawl",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "检查RagFlow",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "检查Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查Knowledge-Mgmt": {
+      "main": [
+        [
+          {
+            "node": "合并检查结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查Firecrawl": {
+      "main": [
+        [
+          {
+            "node": "合并检查结果",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "检查RagFlow": {
+      "main": [
+        [
+          {
+            "node": "合并检查结果",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "检查Ollama": {
+      "main": [
+        [
+          {
+            "node": "合并检查结果",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "合并检查结果": {
+      "main": [
+        [
+          {
+            "node": "汇总健康状态",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "汇总健康状态": {
+      "main": [
+        [
+          {
+            "node": "有告警？",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "有告警？": {
+      "main": [
+        [
+          {
+            "node": "发送告警",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "记录日志",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "发送告警": {
+      "main": [
+        [
+          {
+            "node": "记录日志",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "健康状态API": {
+      "main": [
+        [
+          {
+            "node": "获取当前状态",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "获取当前状态": {
+      "main": [
+        [
+          {
+            "node": "返回健康状态",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": {
+    "global": {
+      "lastStatus": {},
+      "lastCheckTime": null,
+      "healthHistory": []
+    }
+  },
+  "tags": [
+    {
+      "name": "knowledge-management"
+    },
+    {
+      "name": "monitoring"
+    }
+  ],
+  "triggerCount": 2,
+  "versionId": "2"
+}
