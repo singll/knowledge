@@ -175,9 +175,8 @@
       "parameters": {
         "httpMethod": "GET",
         "path": "health-status",
-        "options": {
-          "responseMode": "responseNode"
-        }
+        "responseMode": "responseNode",
+        "options": {}
       },
       "id": "webhook-health-api",
       "name": "健康状态API",

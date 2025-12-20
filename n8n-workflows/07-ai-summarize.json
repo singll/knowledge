@@ -5,9 +5,8 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "ai-summarize",
-        "options": {
-          "responseMode": "responseNode"
-        }
+        "responseMode": "responseNode",
+        "options": {}
       },
       "id": "webhook-summarize",
       "name": "AI总结入口",

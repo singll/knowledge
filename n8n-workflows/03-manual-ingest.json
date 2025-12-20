@@ -5,9 +5,8 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "manual-ingest",
-        "options": {
-          "responseMode": "responseNode"
-        }
+        "responseMode": "responseNode",
+        "options": {}
       },
       "id": "webhook-manual",
       "name": "Webhook 手动触发",
@@ -19,7 +18,7 @@
     {
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "={\n  \"config\": {\n    \"KNOWLEDGE_MGMT_URL\": \"http://knowledge-backend:5000\",\n    \"FIRECRAWL_API_URL\": \"http://firecrawl:3002\",\n    \"RAGFLOW_DATASET_ID_SECURITY\": \"YOUR_SECURITY_DATASET_ID\",\n    \"RAGFLOW_DATASET_ID_NEWS\": \"YOUR_NEWS_DATASET_ID\",\n    \"RAGFLOW_DATASET_ID_AI\": \"YOUR_AI_DATASET_ID\",\n    \"RAGFLOW_DATASET_ID_DEV\": \"YOUR_DEV_DATASET_ID\"\n  },\n  \"input\": {{ JSON.stringify($json.body || $json) }}\n}",
+        "jsonOutput": "={\n  \"config\": {\n    \"KNOWLEDGE_MGMT_URL\": \"http://knowledge-backend:5000\",\n    \"FIRECRAWL_API_URL\": \"http://firecrawl:3002\"\n  },\n  \"input\": {{ JSON.stringify($json.body || $json) }}\n}",
         "options": {}
       },
       "id": "config-node",
@@ -28,7 +27,7 @@
       "typeVersion": 3.4,
       "position": [470, 300],
       "notesInFlow": true,
-      "notes": "修改此节点中的配置值"
+      "notes": "只需配置服务地址，知识库ID通过API动态获取"
     },
     {
       "parameters": {
@@ -61,7 +60,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// 规范化输入参数\nconst data = $input.first().json;\nconst body = data.input;\nconst config = data.config;\n\n// 数据集映射（根据类别选择知识库）\nconst datasetMapping = {\n  'security': config.RAGFLOW_DATASET_ID_SECURITY,\n  'news': config.RAGFLOW_DATASET_ID_NEWS,\n  'ai': config.RAGFLOW_DATASET_ID_AI,\n  'dev': config.RAGFLOW_DATASET_ID_DEV,\n  'default': config.RAGFLOW_DATASET_ID_SECURITY\n};\n\n// 获取目标知识库\nlet dataset = body.dataset || body.category || 'default';\nlet datasetId = body.dataset_id || datasetMapping[dataset] || datasetMapping['default'];\n\n// 处理标签\nlet tags = body.tags || [];\nif (typeof tags === 'string') {\n  tags = tags.split(',').map(t => t.trim()).filter(t => t);\n}\n\nreturn {\n  json: {\n    url: body.url,\n    dataset_id: datasetId,\n    dataset: dataset,\n    tags: tags,\n    source: 'manual',\n    priority: body.priority || 'high',\n    extra_data: body.extra_data || {},\n    config: config\n  }\n};"
+        "jsCode": "// 规范化输入参数（不再需要硬编码知识库ID）\nconst data = $input.first().json;\nconst body = data.input;\nconst config = data.config;\n\n// 处理标签\nlet tags = body.tags || [];\nif (typeof tags === 'string') {\n  tags = tags.split(',').map(t => t.trim()).filter(t => t);\n}\n\nreturn {\n  json: {\n    url: body.url,\n    category: body.dataset || body.category || '',\n    tags: tags,\n    source: 'manual',\n    priority: body.priority || 'high',\n    extra_data: body.extra_data || {},\n    config: config\n  }\n};"
       },
       "id": "normalize-input",
       "name": "规范化输入",
@@ -77,7 +76,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"url\": \"{{ $json.url }}\",\n  \"formats\": [\"markdown\", \"html\"],\n  \"onlyMainContent\": true,\n  \"waitFor\": 3000,\n  \"timeout\": 30000,\n  \"removeBase64Images\": true,\n  \"blockAds\": true\n}",
+        "jsonBody": "={\n  \"url\": \"{{ $json.url }}\",\n  \"formats\": [\"markdown\", \"html\"],\n  \"onlyMainContent\": true,\n  \"waitFor\": 3000,\n  \"timeout\": 30000\n}",
         "options": {
           "response": {
             "response": {
@@ -131,7 +130,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// 处理爬取内容\nconst scrapeResult = $input.first().json;\nconst normalizedInput = $('规范化输入').first().json;\n\nconst data = scrapeResult.data || {};\nconst metadata = data.metadata || {};\n\n// 生成文件名\nconst title = metadata.title || metadata.ogTitle || '未知标题';\nconst cleanTitle = title.replace(/[^a-zA-Z0-9\\u4e00-\\u9fa5\\s-]/g, '').substring(0, 100);\nconst timestamp = new Date().toISOString().replace(/[:.]/g, '-');\nconst filename = `${cleanTitle}_${timestamp}.md`;\n\n// 构建文档内容\nlet content = '';\ncontent += `# ${title}\\n\\n`;\ncontent += `> **来源**: ${normalizedInput.url}\\n`;\ncontent += `> **入库时间**: ${new Date().toLocaleString('zh-CN')}\\n`;\ncontent += `> **入库方式**: 手动添加\\n`;\n\nif (metadata.author) {\n  content += `> **作者**: ${metadata.author}\\n`;\n}\nif (metadata.description) {\n  content += `> **摘要**: ${metadata.description}\\n`;\n}\n\ncontent += '\\n---\\n\\n';\ncontent += data.markdown || data.content || '内容解析失败';\n\nif (normalizedInput.tags && normalizedInput.tags.length > 0) {\n  content += `\\n\\n---\\n**标签**: ${normalizedInput.tags.join(', ')}`;\n}\n\nreturn {\n  json: {\n    url: normalizedInput.url,\n    title: title,\n    filename: filename,\n    content: content,\n    dataset_id: normalizedInput.dataset_id,\n    tags: normalizedInput.tags,\n    config: normalizedInput.config,\n    metadata: {\n      original_url: normalizedInput.url,\n      crawl_time: new Date().toISOString(),\n      content_length: content.length,\n      title: title,\n      author: metadata.author,\n      description: metadata.description\n    }\n  }\n};"
+        "jsCode": "// 处理爬取内容\nconst firstInput = $input.first();\nif (!firstInput || !firstInput.json) {\n  throw new Error('No input data received from crawler');\n}\nconst scrapeResult = firstInput.json;\n\nconst normalizedNode = $('规范化输入').first();\nconst normalizedInput = normalizedNode?.json || {};\n\nconst data = scrapeResult.data || scrapeResult || {};\nconst metadata = data.metadata || {};\n\n// 生成文件名\nconst title = metadata.title || metadata.ogTitle || '未知标题';\nconst cleanTitle = title.replace(/[^a-zA-Z0-9\\u4e00-\\u9fa5\\s-]/g, '').substring(0, 100);\nconst timestamp = new Date().toISOString().replace(/[:.]/g, '-');\nconst filename = `${cleanTitle}_${timestamp}.md`;\n\n// 构建文档内容\nlet content = '';\ncontent += `# ${title}\\n\\n`;\ncontent += `> **来源**: ${normalizedInput.url || 'unknown'}\\n`;\ncontent += `> **入库时间**: ${new Date().toLocaleString('zh-CN')}\\n`;\ncontent += `> **入库方式**: 手动添加\\n`;\n\nif (metadata.author) {\n  content += `> **作者**: ${metadata.author}\\n`;\n}\nif (metadata.description) {\n  content += `> **摘要**: ${metadata.description}\\n`;\n}\n\ncontent += '\\n---\\n\\n';\ncontent += data.markdown || data.content || data.html || '内容解析失败';\n\nconst tags = normalizedInput.tags || [];\nif (tags.length > 0) {\n  content += `\\n\\n---\\n**标签**: ${tags.join(', ')}`;\n}\n\n// 提取关键词（用于标签匹配）\nconst keywords = [];\nif (metadata.keywords) {\n  keywords.push(...metadata.keywords.split(',').map(k => k.trim()));\n}\nif (metadata.description) {\n  const descWords = metadata.description.split(/[\\s,，。、]/)\n    .filter(w => w.length >= 2 && w.length <= 10)\n    .slice(0, 5);\n  keywords.push(...descWords);\n}\n\nreturn {\n  json: {\n    url: normalizedInput.url || '',\n    title: title,\n    filename: filename,\n    content: content,\n    tags: tags,\n    keywords: keywords,\n    category: normalizedInput.category || '',\n    config: normalizedInput.config || {},\n    metadata: {\n      original_url: normalizedInput.url || '',\n      crawl_time: new Date().toISOString(),\n      content_length: content.length,\n      title: title,\n      author: metadata.author || '',\n      description: metadata.description || ''\n    }\n  }\n};"
       },
       "id": "process-content",
       "name": "处理内容",
@@ -142,10 +141,10 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $json.config.KNOWLEDGE_MGMT_URL }}/api/ragflow/upload/string",
+        "url": "={{ $json.config.KNOWLEDGE_MGMT_URL }}/api/ragflow/upload/with-tags",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"dataset_id\": \"{{ $json.dataset_id }}\",\n  \"content\": {{ JSON.stringify($json.content) }},\n  \"filename\": \"{{ $json.filename }}\",\n  \"parser_id\": \"naive\",\n  \"run\": \"1\",\n  \"wait_for_completion\": false\n}",
+        "jsonBody": "={\n  \"content\": {{ JSON.stringify($json.content) }},\n  \"filename\": \"{{ $json.filename }}\",\n  \"title\": {{ JSON.stringify($json.title) }},\n  \"url\": \"{{ $json.url }}\",\n  \"tags\": {{ JSON.stringify($json.tags || []) }},\n  \"keywords\": {{ JSON.stringify($json.keywords || []) }},\n  \"category\": \"{{ $json.category || '' }}\",\n  \"auto_create_tags\": true,\n  \"parser_id\": \"naive\",\n  \"run\": \"1\"\n}",
         "options": {
           "response": {
             "response": {
@@ -156,7 +155,7 @@
         }
       },
       "id": "upload-ragflow",
-      "name": "上传到RagFlow",
+      "name": "智能上传到RagFlow",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1790, 100],
@@ -194,7 +193,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={\n  \"success\": true,\n  \"message\": \"文章已成功入库\",\n  \"data\": {\n    \"url\": \"{{ $('处理内容').first().json.url }}\",\n    \"title\": \"{{ $('处理内容').first().json.title }}\",\n    \"document_id\": \"{{ $json.data?.document_id }}\",\n    \"dataset_id\": \"{{ $('处理内容').first().json.dataset_id }}\",\n    \"content_length\": {{ $('处理内容').first().json.metadata?.content_length }},\n    \"crawl_time\": \"{{ $('处理内容').first().json.metadata?.crawl_time }}\"\n  }\n}",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"文章已成功入库\",\n  \"data\": {\n    \"url\": \"{{ $('处理内容').first()?.json?.url || '' }}\",\n    \"title\": {{ JSON.stringify($('处理内容').first()?.json?.title || '未知标题') }},\n    \"document_id\": \"{{ $json.data?.document_id || '' }}\",\n    \"dataset_id\": \"{{ $json.data?.dataset_id || '' }}\",\n    \"tags\": {{ JSON.stringify($json.data?.tags || []) }},\n    \"content_length\": {{ $('处理内容').first()?.json?.metadata?.content_length || 0 }},\n    \"crawl_time\": \"{{ $('处理内容').first()?.json?.metadata?.crawl_time || '' }}\"\n  }\n}",
         "options": {
           "responseCode": 200
         }
@@ -208,7 +207,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={\n  \"success\": false,\n  \"error\": \"upload_failed\",\n  \"message\": \"上传到知识库失败: {{ $json.message || '未知错误' }}\",\n  \"data\": {\n    \"url\": \"{{ $('处理内容').first().json.url }}\",\n    \"title\": \"{{ $('处理内容').first().json.title }}\"\n  }\n}",
+        "responseBody": "={\n  \"success\": false,\n  \"error\": \"upload_failed\",\n  \"message\": \"上传到知识库失败: {{ $json.message || '未知错误' }}\",\n  \"data\": {\n    \"url\": \"{{ $('处理内容').first()?.json?.url || '' }}\",\n    \"title\": {{ JSON.stringify($('处理内容').first()?.json?.title || '未知标题') }}\n  }\n}",
         "options": {
           "responseCode": 500
         }
@@ -222,7 +221,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={\n  \"success\": false,\n  \"error\": \"scrape_failed\",\n  \"message\": \"网页爬取失败: {{ $json.error || '无法获取网页内容' }}\",\n  \"data\": {\n    \"url\": \"{{ $('规范化输入').first().json.url }}\"\n  }\n}",
+        "responseBody": "={\n  \"success\": false,\n  \"error\": \"scrape_failed\",\n  \"message\": \"网页爬取失败: {{ $json.error || $json.message || '无法获取网页内容' }}\",\n  \"data\": {\n    \"url\": \"{{ $('规范化输入').first()?.json?.url || '' }}\"\n  }\n}",
         "options": {
           "responseCode": 500
         }
@@ -340,14 +339,14 @@
       "main": [
         [
           {
-            "node": "上传到RagFlow",
+            "node": "智能上传到RagFlow",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "上传到RagFlow": {
+    "智能上传到RagFlow": {
       "main": [
         [
           {
@@ -400,5 +399,5 @@
     }
   ],
   "triggerCount": 1,
-  "versionId": "2"
+  "versionId": "3"
 }

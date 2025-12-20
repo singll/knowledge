@@ -22,9 +22,8 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "error-queue",
-        "options": {
-          "responseMode": "responseNode"
-        }
+        "responseMode": "responseNode",
+        "options": {}
       },
       "id": "webhook-error-queue",
       "name": "错误队列入口",

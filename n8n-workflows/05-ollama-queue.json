@@ -22,9 +22,8 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "ollama-queue",
-        "options": {
-          "responseMode": "responseNode"
-        }
+        "responseMode": "responseNode",
+        "options": {}
       },
       "id": "webhook-add-task",
       "name": "添加任务入口",
@@ -37,9 +36,8 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "ollama-control",
-        "options": {
-          "responseMode": "responseNode"
-        }
+        "responseMode": "responseNode",
+        "options": {}
       },
       "id": "webhook-control",
       "name": "队列控制入口",

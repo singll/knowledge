@@ -5,9 +5,8 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "core-crawler",
-        "options": {
-          "responseMode": "responseNode"
-        }
+        "responseMode": "responseNode",
+        "options": {}
       },
       "id": "webhook-trigger",
       "name": "Webhook 触发器",
@@ -19,7 +18,7 @@
     {
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "={\n  \"config\": {\n    \"KNOWLEDGE_MGMT_URL\": \"http://knowledge-backend:5000\",\n    \"FIRECRAWL_API_URL\": \"http://firecrawl:3002\",\n    \"N8N_WEBHOOK_URL\": \"http://n8n:5678\",\n    \"RAGFLOW_DATASET_ID_SECURITY\": \"YOUR_SECURITY_DATASET_ID\",\n    \"RAGFLOW_DATASET_ID_NEWS\": \"YOUR_NEWS_DATASET_ID\",\n    \"RAGFLOW_DATASET_ID_AI\": \"YOUR_AI_DATASET_ID\",\n    \"RAGFLOW_DATASET_ID_DEV\": \"YOUR_DEV_DATASET_ID\"\n  },\n  \"input\": {{ JSON.stringify($json.body || $json) }}\n}",
+        "jsonOutput": "={\n  \"config\": {\n    \"KNOWLEDGE_MGMT_URL\": \"http://knowledge-backend:5000\",\n    \"FIRECRAWL_API_URL\": \"http://firecrawl:3002\",\n    \"N8N_WEBHOOK_URL\": \"http://n8n:5678\"\n  },\n  \"input\": {{ JSON.stringify($json.body || $json) }}\n}",
         "options": {}
       },
       "id": "config-node",
@@ -28,7 +27,7 @@
       "typeVersion": 3.4,
       "position": [470, 300],
       "notesInFlow": true,
-      "notes": "修改此节点中的配置值"
+      "notes": "修改此节点中的配置值（知识库ID现在通过API动态获取）"
     },
     {
       "parameters": {
@@ -67,7 +66,7 @@
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"url\": \"{{ $('配置参数').item.json.input.url }}\",\n  \"formats\": [\"markdown\", \"html\"],\n  \"onlyMainContent\": true,\n  \"waitFor\": 3000,\n  \"timeout\": 30000,\n  \"removeBase64Images\": true,\n  \"blockAds\": true\n}",
+        "jsonBody": "={\n  \"url\": \"{{ $('配置参数').item.json.input.url }}\",\n  \"formats\": [\"markdown\", \"html\"],\n  \"onlyMainContent\": true,\n  \"waitFor\": 3000,\n  \"timeout\": 30000\n}",
         "options": {
           "response": {
             "response": {
@@ -121,7 +120,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// 提取和处理爬取的内容\nconst input = $input.first().json;\nconst configNode = $('配置参数').first().json;\nconst originalData = configNode.input;\nconst config = configNode.config;\n\n// 从 Firecrawl 响应中提取数据\nconst data = input.data || {};\nconst metadata = data.metadata || {};\n\n// 生成文件名\nconst title = metadata.title || metadata.ogTitle || '未知标题';\nconst cleanTitle = title.replace(/[^a-zA-Z0-9\\u4e00-\\u9fa5\\s-]/g, '').substring(0, 100);\nconst timestamp = new Date().toISOString().replace(/[:.]/g, '-');\nconst filename = `${cleanTitle}_${timestamp}.md`;\n\n// 构建文档内容\nlet content = '';\n\n// 添加元数据头\ncontent += `# ${title}\\n\\n`;\ncontent += `> **来源**: ${originalData.url}\\n`;\ncontent += `> **抓取时间**: ${new Date().toLocaleString('zh-CN')}\\n`;\n\nif (metadata.author) {\n  content += `> **作者**: ${metadata.author}\\n`;\n}\nif (metadata.publishedTime) {\n  content += `> **发布时间**: ${metadata.publishedTime}\\n`;\n}\nif (metadata.description) {\n  content += `> **摘要**: ${metadata.description}\\n`;\n}\n\ncontent += '\\n---\\n\\n';\n\n// 添加正文内容\ncontent += data.markdown || data.content || '内容解析失败';\n\n// 添加来源标签\nconst sourceTags = originalData.tags || [];\nif (sourceTags.length > 0) {\n  content += `\\n\\n---\\n**标签**: ${sourceTags.join(', ')}`;\n}\n\n// 确定目标知识库\nlet datasetId = originalData.dataset_id;\nif (!datasetId) {\n  // 根据标签或来源自动选择知识库\n  const category = originalData.category || 'general';\n  const datasetMapping = {\n    'security': config.RAGFLOW_DATASET_ID_SECURITY,\n    'news': config.RAGFLOW_DATASET_ID_NEWS,\n    'ai': config.RAGFLOW_DATASET_ID_AI,\n    'dev': config.RAGFLOW_DATASET_ID_DEV,\n    'general': config.RAGFLOW_DATASET_ID_SECURITY\n  };\n  datasetId = datasetMapping[category] || datasetMapping['general'];\n}\n\nreturn {\n  json: {\n    url: originalData.url,\n    title: title,\n    filename: filename,\n    content: content,\n    dataset_id: datasetId,\n    source: originalData.source || 'manual',\n    tags: sourceTags,\n    config: config,\n    metadata: {\n      original_url: originalData.url,\n      crawl_time: new Date().toISOString(),\n      content_length: content.length,\n      title: title,\n      description: metadata.description,\n      author: metadata.author\n    }\n  }\n};"
+        "jsCode": "// 提取和处理爬取的内容\nconst firstInput = $input.first();\nif (!firstInput || !firstInput.json) {\n  throw new Error('No input data received from crawler');\n}\nconst input = firstInput.json;\n\nconst configNode = $('配置参数').first();\nif (!configNode || !configNode.json) {\n  throw new Error('Cannot access config node data');\n}\nconst configData = configNode.json;\nconst originalData = configData.input || {};\nconst config = configData.config || {};\n\n// 从 Firecrawl 响应中提取数据（添加空值保护）\nconst data = input.data || input || {};\nconst metadata = data.metadata || {};\n\n// 生成文件名\nconst title = metadata.title || metadata.ogTitle || originalData.title || '未知标题';\nconst cleanTitle = title.replace(/[^a-zA-Z0-9\\u4e00-\\u9fa5\\s-]/g, '').substring(0, 100);\nconst timestamp = new Date().toISOString().replace(/[:.]/g, '-');\nconst filename = `${cleanTitle}_${timestamp}.md`;\n\n// 构建文档内容\nlet content = '';\n\n// 添加元数据头\ncontent += `# ${title}\\n\\n`;\ncontent += `> **来源**: ${originalData.url || 'unknown'}\\n`;\ncontent += `> **抓取时间**: ${new Date().toLocaleString('zh-CN')}\\n`;\n\nif (metadata.author) {\n  content += `> **作者**: ${metadata.author}\\n`;\n}\nif (metadata.publishedTime) {\n  content += `> **发布时间**: ${metadata.publishedTime}\\n`;\n}\nif (metadata.description) {\n  content += `> **摘要**: ${metadata.description}\\n`;\n}\n\ncontent += '\\n---\\n\\n';\n\n// 添加正文内容\ncontent += data.markdown || data.content || data.html || '内容解析失败';\n\n// 添加来源标签\nconst sourceTags = originalData.tags || [];\nif (sourceTags.length > 0) {\n  content += `\\n\\n---\\n**标签**: ${sourceTags.join(', ')}`;\n}\n\n// 提取关键词（用于标签匹配）\nconst keywords = [];\nif (metadata.keywords) {\n  keywords.push(...metadata.keywords.split(',').map(k => k.trim()));\n}\nif (metadata.description) {\n  const descWords = metadata.description.split(/[\\s,，。、]/)\n    .filter(w => w.length >= 2 && w.length <= 10)\n    .slice(0, 5);\n  keywords.push(...descWords);\n}\n\nreturn {\n  json: {\n    url: originalData.url || '',\n    title: title,\n    filename: filename,\n    content: content,\n    source: originalData.source || 'manual',\n    category: originalData.category || '',\n    tags: sourceTags,\n    keywords: keywords,\n    config: config,\n    metadata: {\n      original_url: originalData.url || '',\n      crawl_time: new Date().toISOString(),\n      content_length: content.length,\n      title: title,\n      description: metadata.description || '',\n      author: metadata.author || ''\n    }\n  }\n};"
       },
       "id": "process-content",
       "name": "处理爬取内容",
@@ -132,10 +131,10 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $json.config.KNOWLEDGE_MGMT_URL }}/api/ragflow/upload/string",
+        "url": "={{ $json.config.KNOWLEDGE_MGMT_URL }}/api/ragflow/upload/with-tags",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"dataset_id\": \"{{ $json.dataset_id }}\",\n  \"content\": {{ JSON.stringify($json.content) }},\n  \"filename\": \"{{ $json.filename }}\",\n  \"parser_id\": \"naive\",\n  \"run\": \"1\",\n  \"wait_for_completion\": false\n}",
+        "jsonBody": "={\n  \"content\": {{ JSON.stringify($json.content) }},\n  \"filename\": \"{{ $json.filename }}\",\n  \"title\": {{ JSON.stringify($json.title) }},\n  \"url\": \"{{ $json.url }}\",\n  \"tags\": {{ JSON.stringify($json.tags || []) }},\n  \"keywords\": {{ JSON.stringify($json.keywords || []) }},\n  \"category\": \"{{ $json.category || '' }}\",\n  \"auto_create_tags\": true,\n  \"parser_id\": \"naive\",\n  \"run\": \"1\"\n}",
         "options": {
           "response": {
             "response": {
@@ -146,7 +145,7 @@
         }
       },
       "id": "upload-to-ragflow",
-      "name": "上传到 RagFlow",
+      "name": "智能上传到 RagFlow",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1580, 100],
@@ -184,7 +183,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={\n  \"success\": true,\n  \"message\": \"文章已成功入库\",\n  \"data\": {\n    \"url\": \"{{ $('处理爬取内容').first().json.url }}\",\n    \"title\": \"{{ $('处理爬取内容').first().json.title }}\",\n    \"document_id\": \"{{ $json.data?.document_id || '' }}\",\n    \"dataset_id\": \"{{ $('处理爬取内容').first().json.dataset_id }}\",\n    \"content_length\": {{ $('处理爬取内容').first().json.metadata?.content_length || 0 }},\n    \"crawl_time\": \"{{ $('处理爬取内容').first().json.metadata?.crawl_time }}\"\n  }\n}",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"文章已成功入库\",\n  \"data\": {\n    \"url\": \"{{ $('处理爬取内容').first()?.json?.url || '' }}\",\n    \"title\": {{ JSON.stringify($('处理爬取内容').first()?.json?.title || '未知标题') }},\n    \"document_id\": \"{{ $json.data?.document_id || '' }}\",\n    \"dataset_id\": \"{{ $json.data?.dataset_id || '' }}\",\n    \"tags\": {{ JSON.stringify($json.data?.tags || []) }},\n    \"content_length\": {{ $('处理爬取内容').first()?.json?.metadata?.content_length || 0 }},\n    \"crawl_time\": \"{{ $('处理爬取内容').first()?.json?.metadata?.crawl_time || '' }}\"\n  }\n}",
         "options": {
           "responseCode": 200
         }
@@ -198,7 +197,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={\n  \"success\": false,\n  \"error\": \"scrape_failed\",\n  \"message\": \"网页爬取失败: {{ $json.error || '无法获取网页内容' }}\",\n  \"data\": {\n    \"url\": \"{{ $('配置参数').first().json.input.url }}\"\n  }\n}",
+        "responseBody": "={\n  \"success\": false,\n  \"error\": \"scrape_failed\",\n  \"message\": \"网页爬取失败: {{ $json.error || $json.message || '无法获取网页内容' }}\",\n  \"data\": {\n    \"url\": \"{{ $('配置参数').first()?.json?.input?.url || '' }}\"\n  }\n}",
         "options": {
           "responseCode": 500
         }
@@ -211,17 +210,77 @@
     },
     {
       "parameters": {
-        "jsCode": "// 构建爬取失败的错误数据\nconst configNode = $('配置参数').first().json;\nconst originalData = configNode.input;\nconst config = configNode.config;\n\nreturn {\n  json: {\n    success: false,\n    error: 'scrape_failed',\n    message: $json.error || '网页爬取失败',\n    retry_data: {\n      url: originalData.url,\n      dataset_id: originalData.dataset_id,\n      tags: originalData.tags || [],\n      source: originalData.source,\n      category: originalData.category\n    },\n    config: config\n  }\n};"
+        "method": "POST",
+        "url": "={{ $('配置参数').item.json.config.FIRECRAWL_API_URL }}/v1/scrape",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"url\": \"{{ $('配置参数').item.json.input.url }}\",\n  \"formats\": [\"markdown\", \"html\"],\n  \"onlyMainContent\": true,\n  \"waitFor\": 5000,\n  \"timeout\": 60000,\n  \"mobile\": true\n}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 90000
+        }
+      },
+      "id": "firecrawl-retry-mobile",
+      "name": "备用爬取(移动端模式)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1360, 350],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "firecrawl-auth",
+          "name": "Firecrawl API"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-retry-success",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-retry-result",
+      "name": "检查备用爬取结果",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1580, 350]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 构建爬取失败的错误数据\nconst configNode = $('配置参数').first();\nconst configData = configNode?.json || {};\nconst originalData = configData.input || {};\nconst config = configData.config || {};\n\nreturn {\n  json: {\n    success: false,\n    error: 'scrape_failed',\n    message: $json.error || $json.message || '网页爬取失败(主备方案均失败)',\n    retry_data: {\n      url: originalData.url || '',\n      tags: originalData.tags || [],\n      source: originalData.source || '',\n      category: originalData.category || ''\n    },\n    config: config\n  }\n};"
       },
       "id": "scrape-error-handler",
       "name": "爬取失败处理",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1360, 300]
+      "position": [1800, 450]
     },
     {
       "parameters": {
-        "jsCode": "// 构建上传失败的错误数据\nconst processData = $('处理爬取内容').first().json;\n\nreturn {\n  json: {\n    success: false,\n    error: 'upload_failed',\n    message: $json.message || '上传到 RagFlow 失败',\n    retry_data: {\n      url: processData.url,\n      dataset_id: processData.dataset_id,\n      tags: processData.tags || [],\n      source: processData.source,\n      content: processData.content,\n      filename: processData.filename\n    },\n    config: processData.config\n  }\n};"
+        "jsCode": "// 构建上传失败的错误数据\nconst processNode = $('处理爬取内容').first();\nconst processData = processNode?.json || {};\n\nreturn {\n  json: {\n    success: false,\n    error: 'upload_failed',\n    message: $json.message || '上传到 RagFlow 失败',\n    retry_data: {\n      url: processData.url || '',\n      tags: processData.tags || [],\n      source: processData.source || '',\n      content: processData.content || '',\n      filename: processData.filename || ''\n    },\n    config: processData.config || {}\n  }\n};"
       },
       "id": "upload-error-handler",
       "name": "上传失败处理",
@@ -232,7 +291,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={\n  \"success\": false,\n  \"error\": \"upload_failed\",\n  \"message\": \"上传到 RagFlow 失败: {{ $json.message || '未知错误' }}\",\n  \"data\": {\n    \"url\": \"{{ $('处理爬取内容').first().json.url }}\",\n    \"title\": \"{{ $('处理爬取内容').first().json.title }}\"\n  }\n}",
+        "responseBody": "={\n  \"success\": false,\n  \"error\": \"upload_failed\",\n  \"message\": \"上传到 RagFlow 失败: {{ $json.message || '未知错误' }}\",\n  \"data\": {\n    \"url\": \"{{ $('处理爬取内容').first()?.json?.url || '' }}\",\n    \"title\": {{ JSON.stringify($('处理爬取内容').first()?.json?.title || '未知标题') }}\n  }\n}",
         "options": {
           "responseCode": 500
         }
@@ -346,6 +405,42 @@
         ],
         [
           {
+            "node": "备用爬取(移动端模式)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "备用爬取(移动端模式)": {
+      "main": [
+        [
+          {
+            "node": "检查备用爬取结果",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "爬取失败处理",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查备用爬取结果": {
+      "main": [
+        [
+          {
+            "node": "处理爬取内容",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
             "node": "爬取失败处理",
             "type": "main",
             "index": 0
@@ -357,14 +452,14 @@
       "main": [
         [
           {
-            "node": "上传到 RagFlow",
+            "node": "智能上传到 RagFlow",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "上传到 RagFlow": {
+    "智能上传到 RagFlow": {
       "main": [
         [
           {
@@ -415,7 +510,7 @@
       "main": [
         [
           {
-            "node": "发送到错误队列",
+            "node": "上传失败响应",
             "type": "main",
             "index": 0
           }
@@ -450,5 +545,5 @@
     }
   ],
   "triggerCount": 1,
-  "versionId": "2"
+  "versionId": "3"
 }

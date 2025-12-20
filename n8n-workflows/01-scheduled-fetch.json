@@ -23,7 +23,7 @@
     {
       "parameters": {
         "mode": "raw",
-        "jsonOutput": "{\n  \"KNOWLEDGE_MGMT_URL\": \"http://knowledge-backend:5000\",\n  \"FIRECRAWL_API_URL\": \"http://firecrawl:3002\",\n  \"N8N_WEBHOOK_URL\": \"http://n8n:5678\",\n  \"RAGFLOW_DATASET_ID_SECURITY\": \"YOUR_SECURITY_DATASET_ID\",\n  \"RAGFLOW_DATASET_ID_NEWS\": \"YOUR_NEWS_DATASET_ID\",\n  \"RAGFLOW_DATASET_ID_AI\": \"YOUR_AI_DATASET_ID\",\n  \"RAGFLOW_DATASET_ID_DEV\": \"YOUR_DEV_DATASET_ID\"\n}",
+        "jsonOutput": "{\n  \"KNOWLEDGE_MGMT_URL\": \"http://knowledge-backend:5000\",\n  \"FIRECRAWL_API_URL\": \"http://firecrawl:3002\",\n  \"N8N_WEBHOOK_URL\": \"http://n8n:5678\"\n}",
         "options": {}
       },
       "id": "config-node",
@@ -32,7 +32,7 @@
       "typeVersion": 3.4,
       "position": [470, 300],
       "notesInFlow": true,
-      "notes": "修改此节点中的配置值"
+      "notes": "只需配置服务地址，知识库ID通过API动态获取"
     },
     {
       "parameters": {
@@ -124,13 +124,46 @@
     },
     {
       "parameters": {
-        "jsCode": "// 处理 RSS Feed 条目，过滤已处理的文章\nconst items = $input.all();\nconst rssInfo = $('处理RSS列表').first().json;\n\n// 计算 6 小时前的时间（过滤旧文章）\nconst sixHoursAgo = new Date(Date.now() - 6 * 60 * 60 * 1000);\n\n// 如果有 last_fetched，使用它作为过滤时间\nlet filterTime = sixHoursAgo;\nif (rssInfo.last_fetched) {\n  const lastFetched = new Date(rssInfo.last_fetched);\n  if (lastFetched > filterTime) {\n    filterTime = lastFetched;\n  }\n}\n\nconst result = [];\nfor (const item of items) {\n  const pubDate = item.json.pubDate ? new Date(item.json.pubDate) : new Date();\n  \n  // 只处理新文章\n  if (pubDate > filterTime) {\n    result.push({\n      json: {\n        url: item.json.link,\n        title: item.json.title,\n        pubDate: pubDate.toISOString(),\n        description: item.json.contentSnippet || item.json.description,\n        source: 'rss',\n        source_name: rssInfo.name,\n        source_id: rssInfo.id,\n        category: rssInfo.category,\n        tags: rssInfo.tags,\n        config: rssInfo.config\n      }\n    });\n  }\n}\n\n// 限制每个 RSS 源最多处理 10 篇文章\nreturn result.slice(0, 10);"
+        "jsCode": "// 收集 RSS Feed 中所有 URL 用于批量检查\nconst items = $input.all();\nconst rssInfo = $('处理RSS列表').first().json;\n\n// 收集所有 URL\nconst allItems = [];\nconst urls = [];\n\nfor (const item of items) {\n  const url = item.json.link;\n  if (url) {\n    urls.push(url);\n    allItems.push({\n      url: url,\n      title: item.json.title,\n      pubDate: item.json.pubDate,\n      description: item.json.contentSnippet || item.json.description\n    });\n  }\n}\n\nreturn {\n  json: {\n    urls: urls,\n    items: allItems,\n    rss_info: rssInfo\n  }\n};"
       },
       "id": "filter-rss-items",
-      "name": "过滤RSS条目",
+      "name": "收集RSS条目",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [1350, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('处理RSS列表').first().json.config.KNOWLEDGE_MGMT_URL }}/api/ragflow/check-url",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ urls: $json.urls }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "check-urls-exist",
+      "name": "检查URL是否已存在",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1570, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// 过滤出不存在于数据库中的文章\nconst checkResult = $input.first().json;\nconst collectedData = $('收集RSS条目').first().json;\nconst rssInfo = collectedData.rss_info;\nconst allItems = collectedData.items || [];\n\n// 获取已存在 URL 的映射\nconst existingUrls = checkResult.data?.results || {};\n\n// 过滤出不存在的文章\nconst result = [];\nfor (const item of allItems) {\n  const urlInfo = existingUrls[item.url];\n  // 只处理不存在于数据库中的文章\n  if (!urlInfo || !urlInfo.exists) {\n    result.push({\n      json: {\n        url: item.url,\n        title: item.title,\n        pubDate: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),\n        description: item.description,\n        source: 'rss',\n        source_name: rssInfo.name,\n        source_id: rssInfo.id,\n        category: rssInfo.category,\n        tags: rssInfo.tags,\n        config: rssInfo.config\n      }\n    });\n  }\n}\n\n// 返回所有不存在的文章（不再限制数量）\nreturn result;"
+      },
+      "id": "filter-new-items",
+      "name": "过滤未入库条目",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1790, 200]
     },
     {
       "parameters": {
@@ -143,7 +176,7 @@
       "name": "分批处理",
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
-      "position": [1570, 200]
+      "position": [2010, 200]
     },
     {
       "parameters": {
@@ -151,7 +184,7 @@
         "url": "={{ $json.config.N8N_WEBHOOK_URL }}/webhook/core-crawler",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"url\": \"{{ $json.url }}\",\n  \"source\": \"rss\",\n  \"source_name\": \"{{ $json.source_name }}\",\n  \"category\": \"{{ $json.category || 'security' }}\",\n  \"tags\": {{ JSON.stringify($json.tags || []) }}\n}",
+        "jsonBody": "={\n  \"url\": \"{{ $json.url }}\",\n  \"source\": \"rss\",\n  \"source_name\": \"{{ $json.source_name }}\",\n  \"category\": \"{{ $json.category || '' }}\",\n  \"tags\": {{ JSON.stringify($json.tags || []) }}\n}",
         "options": {
           "response": {
             "response": {
@@ -165,7 +198,7 @@
       "name": "调用核心爬取工作流",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1790, 200],
+      "position": [2230, 200],
       "continueOnFail": true
     },
     {
@@ -177,7 +210,7 @@
       "name": "等待间隔",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
-      "position": [2010, 200],
+      "position": [2450, 200],
       "webhookId": "wait-rss"
     },
     {
@@ -195,7 +228,7 @@
       "name": "更新RSS抓取时间",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2230, 200],
+      "position": [2670, 200],
       "continueOnFail": true
     },
     {
@@ -227,7 +260,7 @@
         "url": "={{ $json.config.N8N_WEBHOOK_URL }}/webhook/core-crawler",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"url\": \"{{ $json.url }}\",\n  \"source\": \"datasource\",\n  \"source_name\": \"{{ $json.name }}\",\n  \"category\": \"{{ $json.category || 'security' }}\",\n  \"tags\": {{ JSON.stringify($json.tags || []) }}\n}",
+        "jsonBody": "={\n  \"url\": \"{{ $json.url }}\",\n  \"source\": \"datasource\",\n  \"source_name\": \"{{ $json.name }}\",\n  \"category\": \"{{ $json.category || '' }}\",\n  \"tags\": {{ JSON.stringify($json.tags || []) }}\n}",
         "options": {
           "response": {
             "response": {
@@ -342,7 +375,7 @@
       "main": [
         [
           {
-            "node": "过滤RSS条目",
+            "node": "收集RSS条目",
             "type": "main",
             "index": 0
           }
@@ -356,7 +389,29 @@
         ]
       ]
     },
-    "过滤RSS条目": {
+    "收集RSS条目": {
+      "main": [
+        [
+          {
+            "node": "检查URL是否已存在",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "检查URL是否已存在": {
+      "main": [
+        [
+          {
+            "node": "过滤未入库条目",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "过滤未入库条目": {
       "main": [
         [
           {
@@ -497,5 +552,5 @@
     }
   ],
   "triggerCount": 1,
-  "versionId": "2"
+  "versionId": "3"
 }
